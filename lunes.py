@@ -82,7 +82,7 @@ def handle_turnstile(sb) -> bool:
 
             # 使用 GUI 鼠标模拟点击（通过 CDP）
             sb.uc_gui_click_cf()
-            # 等待验证完成（至少 5 秒）
+            # 等待验证完成（至少 6 秒）
             time.sleep(6)
 
             solved_js = "return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"
@@ -201,20 +201,16 @@ def main():
     print("   Lunes 自动登录续期")
     print("#" * 25)
 
-    # Chrome 选项，用于容器环境稳定运行
-    chrome_options = {
-        "arguments": [
+    # 修正：使用 chrome_args 传递额外参数，而不是 options
+    sb_kwargs = {
+        "uc": True,
+        "headless": False,
+        "chrome_args": [
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--window-size=1920,1080",
-        ]
-    }
-
-    sb_kwargs = {
-        "uc": True,
-        "headless": False,
-        "options": chrome_options,   # 传入额外参数
+        ],
     }
     if PROXY_URL:
         print(f"🔗 使用代理: {PROXY_URL}")
