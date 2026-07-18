@@ -3,7 +3,7 @@ name: Lunes Keepalive
 on:
   schedule:
     - cron: '0 1 * * 0'        # 每周日 1:00 UTC（北京时间 9:00）
-  workflow_dispatch:            # 保留手动触发
+  workflow_dispatch:
 
 jobs:
   keepalive:
@@ -26,8 +26,14 @@ jobs:
             libx11-xcb1 libxcb1 libxcb-shm0 libxcb-xfixes0 \
             libxcb-shape0 libxcb-randr0 libxcb-keysyms1 \
             libxcb-util1 libxcb-icccm4 libxcb-xkb1 \
-            libxkbcommon-x11-0 libgl1-mesa-glx libnss3 \
-            libatk-bridge2.0-0 libgtk-3-0 libdrm2 libgbm1 libasound2
+            libxkbcommon-x11-0 \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libgtk-3-0 \
+            libdrm2 \
+            libgbm1 \
+            libasound2t64 \
+            libgl1
 
       - name: Install Python dependencies
         run: |
