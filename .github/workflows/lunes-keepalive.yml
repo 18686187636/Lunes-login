@@ -38,7 +38,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install --upgrade seleniumbase requests   # 确保最新版
+          pip install --upgrade seleniumbase requests
 
       - name: Run Lunes script
         env:
