@@ -50,20 +50,41 @@ def send_tg_message(status_icon, status_text, extra_text=""):
     except Exception as e:
         print(f"⚠️ Telegram 异常: {e}")
 
-# ========== Turnstile 处理（仅使用 uc_gui_click_cf） ==========
+# ========== Turnstile 处理（增强版） ==========
 def handle_turnstile(sb) -> bool:
+    # 检查是否存在 Turnstile 输入框
     exists_js = "return !!document.querySelector('input[name=\"cf-turnstile-response\"]');"
     if not sb.execute_script(exists_js):
         print("ℹ️ 未检测到 Turnstile，跳过")
         return True
 
     print("🔍 检测到 Turnstile，尝试自动通过...")
-    for attempt in range(4):  # 增加重试次数
+
+    # 先等待 Turnstile iframe 加载完成
+    try:
+        sb.wait_for_element('iframe[src*="challenges.cloudflare.com"]', timeout=15)
+        print("✅ Turnstile iframe 已加载")
+    except Exception:
+        print("⚠️ Turnstile iframe 未在 15 秒内出现，可能已自动通过")
+        # 若 iframe 未出现但输入框已填充，可能已通过
+        if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
+            return True
+        # 否则继续尝试点击
+
+    for attempt in range(4):
         try:
-            # 使用 GUI 鼠标模拟（通过 CDP）
+            # 滚动到 Turnstile 可见区域
+            sb.execute_script("""
+                var el = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                if (el) el.scrollIntoView({behavior: 'smooth', block: 'center'});
+            """)
+            time.sleep(1)
+
+            # 使用 GUI 鼠标模拟点击（通过 CDP）
             sb.uc_gui_click_cf()
-            # 等待验证完成（Turnstile 可能需要几秒）
-            time.sleep(5)
+            # 等待验证完成（至少 5 秒）
+            time.sleep(6)
+
             solved_js = "return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"
             if sb.execute_script(solved_js):
                 print(f"✅ Turnstile 通过（尝试 {attempt+1}）")
@@ -72,6 +93,18 @@ def handle_turnstile(sb) -> bool:
                 print(f"  ⚠️ 第 {attempt+1} 次未完成，重试...")
         except Exception as e:
             print(f"  ⚠️ Turnstile 异常: {e}")
+
+        # 如果失败，尝试直接点击 iframe（回退方案）
+        try:
+            iframe = sb.find_element('iframe[src*="challenges.cloudflare.com"]')
+            sb.driver.execute_script("arguments[0].click();", iframe)  # JS 点击
+            time.sleep(5)
+            if sb.execute_script(solved_js):
+                print(f"✅ Turnstile 通过（备用点击，尝试 {attempt+1}）")
+                return True
+        except Exception:
+            pass
+
         time.sleep(2)
 
     print("❌ Turnstile 4 次尝试均失败")
@@ -168,14 +201,27 @@ def main():
     print("   Lunes 自动登录续期")
     print("#" * 25)
 
-    sb_kwargs = {"uc": True, "headless": False}
+    # Chrome 选项，用于容器环境稳定运行
+    chrome_options = {
+        "arguments": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+        ]
+    }
+
+    sb_kwargs = {
+        "uc": True,
+        "headless": False,
+        "options": chrome_options,   # 传入额外参数
+    }
     if PROXY_URL:
         print(f"🔗 使用代理: {PROXY_URL}")
         sb_kwargs["proxy"] = PROXY_URL
     else:
         print("🌐 直连访问")
 
-    # 打印 SeleniumBase 版本以便调试
     import seleniumbase
     print(f"📦 SeleniumBase 版本: {seleniumbase.__version__}")
 
