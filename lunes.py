@@ -50,7 +50,7 @@ def send_tg_message(status_icon, status_text, extra_text=""):
     except Exception as e:
         print(f"⚠️ Telegram 异常: {e}")
 
-# ========== Turnstile 处理 ==========
+# ========== Turnstile 处理（仅使用 uc_gui_click_cf） ==========
 def handle_turnstile(sb) -> bool:
     exists_js = "return !!document.querySelector('input[name=\"cf-turnstile-response\"]');"
     if not sb.execute_script(exists_js):
@@ -58,26 +58,23 @@ def handle_turnstile(sb) -> bool:
         return True
 
     print("🔍 检测到 Turnstile，尝试自动通过...")
-    for attempt in range(3):
+    for attempt in range(4):  # 增加重试次数
         try:
+            # 使用 GUI 鼠标模拟（通过 CDP）
             sb.uc_gui_click_cf()
-            time.sleep(3)
+            # 等待验证完成（Turnstile 可能需要几秒）
+            time.sleep(5)
             solved_js = "return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"
             if sb.execute_script(solved_js):
                 print(f"✅ Turnstile 通过（尝试 {attempt+1}）")
                 return True
             else:
-                print(f"  ⚠️ 第 {attempt+1} 次未完成，尝试备用方法...")
-                sb.uc_click_cf()
-                time.sleep(3)
-                if sb.execute_script(solved_js):
-                    print(f"✅ Turnstile 通过（备用方法，尝试 {attempt+1}）")
-                    return True
+                print(f"  ⚠️ 第 {attempt+1} 次未完成，重试...")
         except Exception as e:
             print(f"  ⚠️ Turnstile 异常: {e}")
         time.sleep(2)
 
-    print("❌ Turnstile 3 次尝试均失败")
+    print("❌ Turnstile 4 次尝试均失败")
     return False
 
 # ========== 登录 ==========
@@ -177,6 +174,10 @@ def main():
         sb_kwargs["proxy"] = PROXY_URL
     else:
         print("🌐 直连访问")
+
+    # 打印 SeleniumBase 版本以便调试
+    import seleniumbase
+    print(f"📦 SeleniumBase 版本: {seleniumbase.__version__}")
 
     with SB(**sb_kwargs) as sb:
         print("✅ 浏览器已启动")
