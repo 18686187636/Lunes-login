@@ -60,20 +60,18 @@ def handle_turnstile(sb) -> bool:
 
     print("🔍 检测到 Turnstile，尝试自动通过...")
 
-    # 先等待 Turnstile iframe 加载完成
+    # 等待 Turnstile iframe 加载
     try:
         sb.wait_for_element('iframe[src*="challenges.cloudflare.com"]', timeout=15)
         print("✅ Turnstile iframe 已加载")
     except Exception:
         print("⚠️ Turnstile iframe 未在 15 秒内出现，可能已自动通过")
-        # 若 iframe 未出现但输入框已填充，可能已通过
         if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
             return True
-        # 否则继续尝试点击
 
     for attempt in range(4):
         try:
-            # 滚动到 Turnstile 可见区域
+            # 滚动到 Turnstile 区域
             sb.execute_script("""
                 var el = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
                 if (el) el.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -82,8 +80,7 @@ def handle_turnstile(sb) -> bool:
 
             # 使用 GUI 鼠标模拟点击（通过 CDP）
             sb.uc_gui_click_cf()
-            # 等待验证完成（至少 6 秒）
-            time.sleep(6)
+            time.sleep(6)  # 给验证留出时间
 
             solved_js = "return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"
             if sb.execute_script(solved_js):
@@ -94,10 +91,10 @@ def handle_turnstile(sb) -> bool:
         except Exception as e:
             print(f"  ⚠️ Turnstile 异常: {e}")
 
-        # 如果失败，尝试直接点击 iframe（回退方案）
+        # 备用：直接 JS 点击 iframe
         try:
             iframe = sb.find_element('iframe[src*="challenges.cloudflare.com"]')
-            sb.driver.execute_script("arguments[0].click();", iframe)  # JS 点击
+            sb.driver.execute_script("arguments[0].click();", iframe)
             time.sleep(5)
             if sb.execute_script(solved_js):
                 print(f"✅ Turnstile 通过（备用点击，尝试 {attempt+1}）")
@@ -125,6 +122,7 @@ def login(sb) -> bool:
         print("❌ 登录表单未加载")
         return False
 
+    # 关闭 Cookie 弹窗
     try:
         for btn in sb.find_elements("button"):
             if "Accept" in (btn.text or ""):
@@ -201,16 +199,10 @@ def main():
     print("   Lunes 自动登录续期")
     print("#" * 25)
 
-    # 修正：使用 chrome_args 传递额外参数，而不是 options
+    # 注意：不再传递 chrome_args，让 uc 模式自动处理
     sb_kwargs = {
         "uc": True,
         "headless": False,
-        "chrome_args": [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-        ],
     }
     if PROXY_URL:
         print(f"🔗 使用代理: {PROXY_URL}")
