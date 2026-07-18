@@ -50,7 +50,7 @@ def send_tg_message(status_icon, status_text, extra_text=""):
     except Exception as e:
         print(f"⚠️ Telegram 异常: {e}")
 
-# ========== Turnstile 处理（增强版） ==========
+# ========== Turnstile 处理（全面增强） ==========
 def handle_turnstile(sb) -> bool:
     # 检查是否存在 Turnstile 输入框
     exists_js = "return !!document.querySelector('input[name=\"cf-turnstile-response\"]');"
@@ -60,51 +60,88 @@ def handle_turnstile(sb) -> bool:
 
     print("🔍 检测到 Turnstile，尝试自动通过...")
 
-    # 等待 Turnstile iframe 加载
-    try:
-        sb.wait_for_element('iframe[src*="challenges.cloudflare.com"]', timeout=15)
-        print("✅ Turnstile iframe 已加载")
-    except Exception:
-        print("⚠️ Turnstile iframe 未在 15 秒内出现，可能已自动通过")
-        if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
-            return True
+    # ---- 第一步：等待 iframe 出现（最多30秒） ----
+    iframe_present = False
+    for _ in range(30):
+        if sb.execute_script("return !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');"):
+            iframe_present = True
+            print("✅ Turnstile iframe 已加载")
+            break
+        time.sleep(1)
+    if not iframe_present:
+        print("⚠️ Turnstile iframe 未出现，尝试其他方式...")
+        # 保存源码便于调试
+        with open("turnstile_no_iframe.html", "w", encoding="utf-8") as f:
+            f.write(sb.get_page_source())
 
-    for attempt in range(4):
+    # ---- 第二步：多种尝试点击 ----
+    for attempt in range(5):
         try:
-            # 滚动到 Turnstile 区域
+            # 策略 A：使用 uc_gui_click_cf (依赖 iframe)
+            if iframe_present:
+                # 滚动到 iframe 可见
+                sb.execute_script("""
+                    var el = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                    if (el) el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                """)
+                time.sleep(1)
+                sb.uc_gui_click_cf()
+                time.sleep(6)
+                if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
+                    print(f"✅ Turnstile 通过（uc_gui_click_cf，尝试 {attempt+1}）")
+                    return True
+
+            # 策略 B：尝试点击包含 Turnstile 的父级容器（如果 iframe 缺失）
+            if not iframe_present:
+                # 查找包含 turnstile 的 div
+                parent_js = """
+                    var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                    if (!inp) return null;
+                    var parent = inp.parentElement;
+                    for (var i=0; i<5; i++) {
+                        if (!parent) break;
+                        if (parent.tagName === 'DIV' && parent.clientHeight > 30) {
+                            return parent;
+                        }
+                        parent = parent.parentElement;
+                    }
+                    return null;
+                """
+                container = sb.execute_script(parent_js)
+                if container:
+                    sb.driver.execute_script("arguments[0].click();", container)
+                    time.sleep(5)
+                    if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
+                        print(f"✅ Turnstile 通过（点击容器，尝试 {attempt+1}）")
+                        return True
+
+            # 策略 C：直接点击隐藏的 input 或其后的元素（JS 点击）
             sb.execute_script("""
-                var el = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
-                if (el) el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                if (inp) {
+                    // 尝试点击其父元素
+                    var parent = inp.parentElement;
+                    if (parent) parent.click();
+                    // 或者触发 click 事件
+                    var evt = new MouseEvent('click', {bubbles: true, cancelable: true});
+                    inp.dispatchEvent(evt);
+                }
             """)
-            time.sleep(1)
-
-            # 使用 GUI 鼠标模拟点击（通过 CDP）
-            sb.uc_gui_click_cf()
-            time.sleep(6)  # 给验证留出时间
-
-            solved_js = "return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"
-            if sb.execute_script(solved_js):
-                print(f"✅ Turnstile 通过（尝试 {attempt+1}）")
+            time.sleep(5)
+            if sb.execute_script("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value?.length > 20;"):
+                print(f"✅ Turnstile 通过（JS 点击，尝试 {attempt+1}）")
                 return True
-            else:
-                print(f"  ⚠️ 第 {attempt+1} 次未完成，重试...")
+
+            print(f"  ⚠️ 第 {attempt+1} 次未完成，重试...")
         except Exception as e:
             print(f"  ⚠️ Turnstile 异常: {e}")
 
-        # 备用：直接 JS 点击 iframe
-        try:
-            iframe = sb.find_element('iframe[src*="challenges.cloudflare.com"]')
-            sb.driver.execute_script("arguments[0].click();", iframe)
-            time.sleep(5)
-            if sb.execute_script(solved_js):
-                print(f"✅ Turnstile 通过（备用点击，尝试 {attempt+1}）")
-                return True
-        except Exception:
-            pass
-
         time.sleep(2)
 
-    print("❌ Turnstile 4 次尝试均失败")
+    print("❌ Turnstile 所有尝试均失败")
+    sb.save_screenshot("turnstile_failed.png")
+    with open("turnstile_failed_source.html", "w", encoding="utf-8") as f:
+        f.write(sb.get_page_source())
     return False
 
 # ========== 登录 ==========
@@ -137,7 +174,6 @@ def login(sb) -> bool:
     time.sleep(1)
 
     if not handle_turnstile(sb):
-        sb.save_screenshot("turnstile_failed.png")
         return False
 
     sb.press_keys('input[type="password"], input[name="password"]', '\n')
@@ -199,7 +235,6 @@ def main():
     print("   Lunes 自动登录续期")
     print("#" * 25)
 
-    # 注意：不再传递 chrome_args，让 uc 模式自动处理
     sb_kwargs = {
         "uc": True,
         "headless": False,
