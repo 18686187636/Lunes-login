@@ -22,10 +22,8 @@ def send_tg_message(status_icon, status_text, extra_text=""):
         print("ℹ️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过 Telegram 推送。")
         return
 
-    # 使用系统本地时间（无需硬编码时区）
     current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-    # 邮箱脱敏
     if '@' in EMAIL:
         name, domain = EMAIL.split('@', 1)
         if len(name) > 4:
@@ -202,18 +200,17 @@ def handle_turnstile(sb) -> bool:
         print("✅ 已静默通过")
         return True
 
-    # 先尝试使用 SeleniumBase 内置 UC 点击（如果可用）
+    # 尝试使用 SeleniumBase UC 点击（如果可用）
     try:
-        # 检查是否有 iframe 存在
         if sb.find_elements("iframe[src*='challenges.cloudflare.com']"):
             print("  尝试使用 SeleniumBase UC 自动点击...")
-            sb.uc_gui_click_captcha()  # 若 UC 模式有效
+            sb.uc_gui_click_captcha()
             time.sleep(3)
             if sb.execute_script(_SOLVED_JS):
                 print("✅ Turnstile 通过（UC 模式）")
                 return True
     except Exception:
-        pass  # 失败则回退到 xdotool
+        pass
 
     # 回退：手动展开 + xdotool 点击
     for _ in range(3):
@@ -241,7 +238,7 @@ def handle_turnstile(sb) -> bool:
     print("  ❌ Turnstile 6 次均失败")
     return False
 
-# ========== 登录函数（改进版） ==========
+# ========== 登录函数（优化重定向等待） ==========
 def login(sb) -> bool:
     print(f"🌐 打开登录页面: {LOGIN_URL}")
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
@@ -259,7 +256,6 @@ def login(sb) -> bool:
     if not cf_passed:
         print("⚠️ Cloudflare 验证可能未通过，继续尝试...")
 
-    # 等待邮箱输入框出现
     try:
         sb.wait_for_element('input[name="email"]', timeout=15)
     except Exception:
@@ -293,7 +289,6 @@ def login(sb) -> bool:
     js_fill_input(sb, 'input[name="password"]', PASSWORD)
     time.sleep(1)
 
-    # 处理 Turnstile
     if sb.execute_script(_EXISTS_JS):
         if not handle_turnstile(sb):
             print("❌ 登录界面的 Turnstile 验证失败")
@@ -304,10 +299,10 @@ def login(sb) -> bool:
 
     print("🖱️ 提交登录...")
     sb.press_keys('input[name="password"]', '\n')
-    time.sleep(2)  # 等待提交响应
+    time.sleep(2)  # 等待请求响应
 
-    # ---------- 改进的登录成功判断 ----------
-    # 1. 检查是否有错误提示（常见类名）
+    # ---------- 改进的登录后检测 ----------
+    # 1. 快速检查错误消息（第一次）
     error_selectors = [".alert-danger", ".error", ".invalid-feedback", ".text-danger", ".alert"]
     for sel in error_selectors:
         err_elements = sb.find_elements(sel)
@@ -317,40 +312,59 @@ def login(sb) -> bool:
                 sb.save_screenshot("login_error.png")
                 return False
 
-    # 2. 等待仪表板特征元素出现（或 URL 不再包含 /login）
-    print("⏳ 等待登录后页面加载...")
-    # 尝试等待服务器卡片或用户菜单等仅登录后出现的元素
-    dashboard_indicators = [
-        'a.server-card',
-        '.server-card',
-        '.dashboard',
-        '.user-menu',
-        'nav .dropdown',
-        'a[href*="/servers"]'
-    ]
-    for indicator in dashboard_indicators:
-        try:
-            sb.wait_for_element_visible(indicator, timeout=8)
-            print(f"✅ 检测到仪表板元素 '{indicator}'，登录成功！")
-            return True
-        except Exception:
-            continue
+    # 2. 等待重定向（URL 不再包含 /login）或出现仪表板元素，最多 20 秒
+    print("⏳ 等待页面重定向或仪表板加载...")
+    start_time = time.time()
+    redirect_occurred = False
+    while time.time() - start_time < 20:
+        current_url = sb.get_current_url().split('?')[0].lower()
+        # 如果 URL 不再包含 /login，视为重定向成功
+        if "/login" not in current_url:
+            print(f"✅ 页面已重定向到 {current_url}")
+            redirect_occurred = True
+            break
 
-    # 如果仪表板元素未找到，检查 URL 是否跳转
-    cur_url = sb.get_current_url().split('?')[0].lower()
-    if "/login" not in cur_url:
-        print(f"✅ 重定向到 {cur_url}，认为登录成功")
-        return True
+        # 检查是否出现错误消息（可能延迟出现）
+        for sel in error_selectors:
+            err_elements = sb.find_elements(sel)
+            for err in err_elements:
+                if err.is_displayed() and err.text.strip():
+                    print(f"❌ 登录失败，服务端返回错误: {err.text.strip()}")
+                    sb.save_screenshot("login_error.png")
+                    return False
+
+        # 检查是否有仪表板元素出现（即使 URL 未变，可能面板就在登录页）
+        try:
+            if sb.find_elements('a.server-card'):
+                print("✅ 检测到服务器卡片，登录成功！")
+                return True
+        except Exception:
+            pass
+
+        time.sleep(1)
     else:
-        # 仍然在登录页，可能因二次验证或密码错误，但没显示错误信息
-        print("❌ 登录后仍停留在登录页，未检测到仪表板元素")
-        sb.save_screenshot("login_still_login_page.png")
+        # 超时仍未重定向
+        print("❌ 登录后超过 20 秒仍未重定向，仍停留在登录页")
+        sb.save_screenshot("login_no_redirect.png")
         return False
 
-# ========== 访问服务器（改进版） ==========
+    # 3. 重定向发生后，等待服务器卡片出现（确保页面完全加载）
+    if redirect_occurred:
+        print("⏳ 等待仪表板元素完全加载...")
+        try:
+            sb.wait_for_element_visible('a.server-card', timeout=15)
+            print("✅ 检测到服务器卡片，登录成功！")
+            return True
+        except Exception:
+            # 卡片未出现，但重定向已经发生，可能页面结构不同，但仍然认为登录成功
+            print("⚠️ 未找到服务器卡片，但已成功重定向，视为登录成功")
+            return True
+
+    return False  # 理论上不会走到这里
+
+# ========== 访问服务器 ==========
 def visit_server(sb) -> (bool, dict):
     print("🔍 正在查找服务器卡片...")
-    # 先等待卡片出现（允许异步加载）
     try:
         sb.wait_for_element_visible('a.server-card', timeout=20)
     except Exception:
@@ -367,11 +381,9 @@ def visit_server(sb) -> (bool, dict):
     if not cards:
         return False, {"error": "未找到服务器卡片"}
 
-    # 取第一个卡片
     card = cards[0]
     href = card.get_attribute('href')
     if not href:
-        # 尝试查找内部链接
         inner_link = card.find_element('a') if card.find_elements('a') else None
         if inner_link:
             href = inner_link.get_attribute('href')
@@ -384,7 +396,6 @@ def visit_server(sb) -> (bool, dict):
     server_id = match.group(1)
 
     print(f"🖱️ 点击服务器卡片 (ID: {server_id})")
-    # 使用 JavaScript 点击，避免被拦截
     sb.execute_script("arguments[0].click();", card)
     time.sleep(3)
 
@@ -413,7 +424,6 @@ def main():
     print("   Lunes 自动登录续期")
     print("#" * 25)
     
-    # 检查必要环境变量
     if not EMAIL or not PASSWORD:
         print("❌ 请设置环境变量 LUNES_EMAIL 和 LUNES_PASSWORD")
         return
