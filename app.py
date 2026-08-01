@@ -8,23 +8,24 @@ import requests
 import re
 from seleniumbase import SB
 
-# 从环境变量获取账号密码和 TG 配置
-EMAIL        = os.environ.get("LUNES_EMAIL") or ""     # 登录邮箱
-PASSWORD     = os.environ.get("LUNES_PASSWORD") or ""  # 登录密码
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""      # chat id,可选
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""    # bot token,可选
+# ========== 环境变量配置 ==========
+EMAIL        = os.environ.get("LUNES_EMAIL") or ""     
+PASSWORD     = os.environ.get("LUNES_PASSWORD") or ""  
+TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""      
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""    
 
 LOGIN_URL = "https://betadash.lunes.host/login?next=/"
 
-#  Telegram 推送
+# ========== Telegram 推送 ==========
 def send_tg_message(status_icon, status_text, extra_text=""):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过 Telegram 推送。")
         return
 
-    local_time = time.gmtime(time.time() + 8 * 3600)
-    current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+    # 使用系统本地时间（无需硬编码时区）
+    current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
+    # 邮箱脱敏
     if '@' in EMAIL:
         name, domain = EMAIL.split('@', 1)
         if len(name) > 4:
@@ -55,7 +56,7 @@ def send_tg_message(status_icon, status_text, extra_text=""):
     except Exception as e:
         print(f"  ⚠️ Telegram 通知发送异常: {e}")
 
-#  js注入脚本
+# ========== Turnstile 处理相关 JS ==========
 _EXPAND_JS = """
 (function() {
     var ts = document.querySelector('input[name="cf-turnstile-response"]');
@@ -147,6 +148,7 @@ def js_fill_input(sb, selector: str, text: str):
     }})()
     """)
 
+# ========== xdotool 辅助（用于点击 Turnstile） ==========
 def _activate_window():
     for cls in ["chrome", "chromium", "Chromium", "Chrome", "google-chrome"]:
         try:
@@ -200,6 +202,20 @@ def handle_turnstile(sb) -> bool:
         print("✅ 已静默通过")
         return True
 
+    # 先尝试使用 SeleniumBase 内置 UC 点击（如果可用）
+    try:
+        # 检查是否有 iframe 存在
+        if sb.find_elements("iframe[src*='challenges.cloudflare.com']"):
+            print("  尝试使用 SeleniumBase UC 自动点击...")
+            sb.uc_gui_click_captcha()  # 若 UC 模式有效
+            time.sleep(3)
+            if sb.execute_script(_SOLVED_JS):
+                print("✅ Turnstile 通过（UC 模式）")
+                return True
+    except Exception:
+        pass  # 失败则回退到 xdotool
+
+    # 回退：手动展开 + xdotool 点击
     for _ in range(3):
         try: sb.execute_script(_EXPAND_JS)
         except Exception: pass
@@ -225,6 +241,7 @@ def handle_turnstile(sb) -> bool:
     print("  ❌ Turnstile 6 次均失败")
     return False
 
+# ========== 登录函数（改进版） ==========
 def login(sb) -> bool:
     print(f"🌐 打开登录页面: {LOGIN_URL}")
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
@@ -242,6 +259,7 @@ def login(sb) -> bool:
     if not cf_passed:
         print("⚠️ Cloudflare 验证可能未通过，继续尝试...")
 
+    # 等待邮箱输入框出现
     try:
         sb.wait_for_element('input[name="email"]', timeout=15)
     except Exception:
@@ -256,6 +274,7 @@ def login(sb) -> bool:
             sb.save_screenshot("login_load_fail.png")
             return False
 
+    # 关闭 Cookie 弹窗
     print("🍪 关闭可能的 Cookie 弹窗...")
     try:
         for btn in sb.find_elements("button"):
@@ -274,6 +293,7 @@ def login(sb) -> bool:
     js_fill_input(sb, 'input[name="password"]', PASSWORD)
     time.sleep(1)
 
+    # 处理 Turnstile
     if sb.execute_script(_EXISTS_JS):
         if not handle_turnstile(sb):
             print("❌ 登录界面的 Turnstile 验证失败")
@@ -284,40 +304,77 @@ def login(sb) -> bool:
 
     print("🖱️ 提交登录...")
     sb.press_keys('input[name="password"]', '\n')
+    time.sleep(2)  # 等待提交响应
 
-    print("⏳ 等待登录跳转...")
-    for _ in range(12):
-        time.sleep(1)
-        cur_url = sb.get_current_url().split('?')[0].lower()
-        page_title = sb.get_title() or ""
-        if cur_url.startswith("https://betadash.lunes.host") or "Lunes host | Account page" in page_title.lower():
-            break
+    # ---------- 改进的登录成功判断 ----------
+    # 1. 检查是否有错误提示（常见类名）
+    error_selectors = [".alert-danger", ".error", ".invalid-feedback", ".text-danger", ".alert"]
+    for sel in error_selectors:
+        err_elements = sb.find_elements(sel)
+        for err in err_elements:
+            if err.is_displayed() and err.text.strip():
+                print(f"❌ 登录失败，服务端返回错误: {err.text.strip()}")
+                sb.save_screenshot("login_error.png")
+                return False
 
+    # 2. 等待仪表板特征元素出现（或 URL 不再包含 /login）
+    print("⏳ 等待登录后页面加载...")
+    # 尝试等待服务器卡片或用户菜单等仅登录后出现的元素
+    dashboard_indicators = [
+        'a.server-card',
+        '.server-card',
+        '.dashboard',
+        '.user-menu',
+        'nav .dropdown',
+        'a[href*="/servers"]'
+    ]
+    for indicator in dashboard_indicators:
+        try:
+            sb.wait_for_element_visible(indicator, timeout=8)
+            print(f"✅ 检测到仪表板元素 '{indicator}'，登录成功！")
+            return True
+        except Exception:
+            continue
+
+    # 如果仪表板元素未找到，检查 URL 是否跳转
     cur_url = sb.get_current_url().split('?')[0].lower()
-    page_title = sb.get_title() or ""
-    if cur_url.startswith("https://betadash.lunes.host") or "Lunes host | Account page" in page_title.lower():
-        print(f"✅ 登录成功！(URL: {sb.get_current_url()}, Title: {page_title})")
+    if "/login" not in cur_url:
+        print(f"✅ 重定向到 {cur_url}，认为登录成功")
         return True
-        
-    print(f"❌ 登录失败，页面未跳转到账户页。(URL: {sb.get_current_url()}, Title: {page_title})")
-    sb.save_screenshot("login_failed.png")
-    return False
+    else:
+        # 仍然在登录页，可能因二次验证或密码错误，但没显示错误信息
+        print("❌ 登录后仍停留在登录页，未检测到仪表板元素")
+        sb.save_screenshot("login_still_login_page.png")
+        return False
 
-# ===== 修正后的 visit_server =====
+# ========== 访问服务器（改进版） ==========
 def visit_server(sb) -> (bool, dict):
     print("🔍 正在查找服务器卡片...")
+    # 先等待卡片出现（允许异步加载）
     try:
-        sb.wait_for_element('a.server-card', timeout=15)
+        sb.wait_for_element_visible('a.server-card', timeout=20)
     except Exception:
-        print("❌ 未找到服务器卡片（可能没有服务器）")
-        return False, {"error": "未找到服务器卡片，可能账户无服务器"}
+        print("  首次未找到卡片，刷新页面重试...")
+        sb.refresh()
+        time.sleep(3)
+        try:
+            sb.wait_for_element_visible('a.server-card', timeout=15)
+        except Exception:
+            print("❌ 刷新后仍未找到服务器卡片")
+            return False, {"error": "未找到服务器卡片，可能账户无服务器"}
 
     cards = sb.find_elements('a.server-card')
     if not cards:
         return False, {"error": "未找到服务器卡片"}
 
+    # 取第一个卡片
     card = cards[0]
     href = card.get_attribute('href')
+    if not href:
+        # 尝试查找内部链接
+        inner_link = card.find_element('a') if card.find_elements('a') else None
+        if inner_link:
+            href = inner_link.get_attribute('href')
     if not href:
         return False, {"error": "卡片缺少 href 属性"}
 
@@ -327,7 +384,8 @@ def visit_server(sb) -> (bool, dict):
     server_id = match.group(1)
 
     print(f"🖱️ 点击服务器卡片 (ID: {server_id})")
-    card.click()
+    # 使用 JavaScript 点击，避免被拦截
+    sb.execute_script("arguments[0].click();", card)
     time.sleep(3)
 
     expected_url_prefix = f"https://betadash.lunes.host/servers/{server_id}"
@@ -349,11 +407,17 @@ def visit_server(sb) -> (bool, dict):
     print(f"✅ 成功访问服务器: {server_name} (ID: {server_id})")
     return True, {"server_id": server_id, "server_name": server_name}
 
+# ========== 主函数 ==========
 def main():
     print("#" * 25)
     print("   Lunes 自动登录续期")
     print("#" * 25)
     
+    # 检查必要环境变量
+    if not EMAIL or not PASSWORD:
+        print("❌ 请设置环境变量 LUNES_EMAIL 和 LUNES_PASSWORD")
+        return
+
     is_proxy = os.environ.get("IS_PROXY", "false").lower() == "true"
     sb_kwargs = {"uc": True, "headless": False}
     
@@ -377,7 +441,7 @@ def main():
             success, info = visit_server(sb)
             if success:
                 extra = f"服务器: {info['server_name']}\nID: {info['server_id']}"
-                send_tg_message("✅", "续期成功")
+                send_tg_message("✅", "续期成功", extra)
             else:
                 error_msg = info.get('error', '未知错误')
                 print(f"❌ 访问服务器失败: {error_msg}")
