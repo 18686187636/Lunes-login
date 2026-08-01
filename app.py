@@ -146,7 +146,7 @@ def js_fill_input(sb, selector: str, text: str):
     }})()
     """)
 
-# ========== xdotool 辅助（用于点击 Turnstile） ==========
+# ========== xdotool 辅助 ==========
 def _activate_window():
     for cls in ["chrome", "chromium", "Chromium", "Chrome", "google-chrome"]:
         try:
@@ -200,7 +200,6 @@ def handle_turnstile(sb) -> bool:
         print("✅ 已静默通过")
         return True
 
-    # 尝试使用 SeleniumBase UC 点击（如果可用）
     try:
         if sb.find_elements("iframe[src*='challenges.cloudflare.com']"):
             print("  尝试使用 SeleniumBase UC 自动点击...")
@@ -212,7 +211,6 @@ def handle_turnstile(sb) -> bool:
     except Exception:
         pass
 
-    # 回退：手动展开 + xdotool 点击
     for _ in range(3):
         try: sb.execute_script(_EXPAND_JS)
         except Exception: pass
@@ -238,7 +236,7 @@ def handle_turnstile(sb) -> bool:
     print("  ❌ Turnstile 6 次均失败")
     return False
 
-# ========== 登录函数（优化重定向等待） ==========
+# ========== 登录函数 ==========
 def login(sb) -> bool:
     print(f"🌐 打开登录页面: {LOGIN_URL}")
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=5)
@@ -270,7 +268,6 @@ def login(sb) -> bool:
             sb.save_screenshot("login_load_fail.png")
             return False
 
-    # 关闭 Cookie 弹窗
     print("🍪 关闭可能的 Cookie 弹窗...")
     try:
         for btn in sb.find_elements("button"):
@@ -299,10 +296,8 @@ def login(sb) -> bool:
 
     print("🖱️ 提交登录...")
     sb.press_keys('input[name="password"]', '\n')
-    time.sleep(2)  # 等待请求响应
+    time.sleep(2)
 
-    # ---------- 改进的登录后检测 ----------
-    # 1. 快速检查错误消息（第一次）
     error_selectors = [".alert-danger", ".error", ".invalid-feedback", ".text-danger", ".alert"]
     for sel in error_selectors:
         err_elements = sb.find_elements(sel)
@@ -312,19 +307,16 @@ def login(sb) -> bool:
                 sb.save_screenshot("login_error.png")
                 return False
 
-    # 2. 等待重定向（URL 不再包含 /login）或出现仪表板元素，最多 20 秒
     print("⏳ 等待页面重定向或仪表板加载...")
     start_time = time.time()
     redirect_occurred = False
     while time.time() - start_time < 20:
         current_url = sb.get_current_url().split('?')[0].lower()
-        # 如果 URL 不再包含 /login，视为重定向成功
         if "/login" not in current_url:
             print(f"✅ 页面已重定向到 {current_url}")
             redirect_occurred = True
             break
 
-        # 检查是否出现错误消息（可能延迟出现）
         for sel in error_selectors:
             err_elements = sb.find_elements(sel)
             for err in err_elements:
@@ -333,7 +325,6 @@ def login(sb) -> bool:
                     sb.save_screenshot("login_error.png")
                     return False
 
-        # 检查是否有仪表板元素出现（即使 URL 未变，可能面板就在登录页）
         try:
             if sb.find_elements('a.server-card'):
                 print("✅ 检测到服务器卡片，登录成功！")
@@ -343,12 +334,10 @@ def login(sb) -> bool:
 
         time.sleep(1)
     else:
-        # 超时仍未重定向
         print("❌ 登录后超过 20 秒仍未重定向，仍停留在登录页")
         sb.save_screenshot("login_no_redirect.png")
         return False
 
-    # 3. 重定向发生后，等待服务器卡片出现（确保页面完全加载）
     if redirect_occurred:
         print("⏳ 等待仪表板元素完全加载...")
         try:
@@ -356,13 +345,12 @@ def login(sb) -> bool:
             print("✅ 检测到服务器卡片，登录成功！")
             return True
         except Exception:
-            # 卡片未出现，但重定向已经发生，可能页面结构不同，但仍然认为登录成功
             print("⚠️ 未找到服务器卡片，但已成功重定向，视为登录成功")
             return True
 
-    return False  # 理论上不会走到这里
+    return False
 
-# ========== 访问服务器 ==========
+# ========== 访问服务器（修正点击） ==========
 def visit_server(sb) -> (bool, dict):
     print("🔍 正在查找服务器卡片...")
     try:
@@ -396,7 +384,17 @@ def visit_server(sb) -> (bool, dict):
     server_id = match.group(1)
 
     print(f"🖱️ 点击服务器卡片 (ID: {server_id})")
-    sb.execute_script("arguments[0].click();", card)
+    # 使用原生 click，避免 CDP 下 arguments 未定义
+    try:
+        card.click()
+    except Exception as e:
+        print(f"原生点击失败: {e}，尝试用 JavaScript 点击")
+        try:
+            # 某些版本可能仍支持，但若失败则放弃
+            sb.execute_script("arguments[0].click();", card)
+        except Exception:
+            print("JavaScript 点击也失败，使用 sb.click()")
+            sb.click(card)
     time.sleep(3)
 
     expected_url_prefix = f"https://betadash.lunes.host/servers/{server_id}"
